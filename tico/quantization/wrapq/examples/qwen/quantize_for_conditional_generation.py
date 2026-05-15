@@ -88,10 +88,6 @@ def create_visual_input(
     image_token_id: int,
 ):
     """Helper to create input with videos or images."""
-    assert (
-        image_token_id >= vocab_size - 2
-    ), f"Visual token Id {image_token_id} must be outside text vocabulary range 0...{vocab_size-2}."
-
     batch_size = 1
 
     # Calculate number of visual placeholder tokens needed

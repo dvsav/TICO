@@ -362,7 +362,13 @@ def generate_answer(
     if do_sample:
         gen_kwargs["temperature"] = temperature
 
-    out_ids = model.generate(**inputs, **gen_kwargs)
+    # Filter out keys not recognized by HuggingFace generate()
+    # Some processors add model-specific keys that generate() doesn't accept
+    _UNRECOGNIZED_GENERATE_KEYS = {"mm_token_type_ids"}
+    filtered_inputs = {k: v for k, v in inputs.items() 
+                       if k not in _UNRECOGNIZED_GENERATE_KEYS}
+
+    out_ids = model.generate(**filtered_inputs, **gen_kwargs)
 
     input_len = inputs["input_ids"].shape[1]
     gen_ids = out_ids[0, input_len:]

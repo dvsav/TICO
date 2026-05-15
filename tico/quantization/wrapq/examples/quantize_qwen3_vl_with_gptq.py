@@ -17,6 +17,7 @@ import contextlib
 import io
 from typing import Any, Optional
 
+import tico
 import torch
 import tqdm
 from transformers import AutoProcessor
@@ -748,6 +749,36 @@ def get_num_deepstack_mergers(q_m) -> int:
     return num_deepstack_mergers
 
 
+from tico.quantization.wrapq.examples.qwen.quantize_for_conditional_generation import ModelInput, create_visual_input
+
+
+def dict_to_model_input(input: dict[str, Any]) -> ModelInput:
+    return ModelInput(
+        input_ids=input.get("input_ids"),
+        attention_mask=input.get("attention_mask"),
+        position_ids=input.get("position_ids"),
+        past_key_values=input.get("past_key_values"),
+        inputs_embeds=input.get("inputs_embeds"),
+        labels=input.get("labels"),
+        pixel_values=input.get("pixel_values"),
+        pixel_values_videos=input.get("pixel_values_videos"),
+        image_grid_thw=input.get("image_grid_thw"),
+        video_grid_thw=input.get("video_grid_thw"),
+        cache_position=input.get("cache_position"),
+        logits_to_keep=input.get("logits_to_keep"),
+    )
+
+
+def move_model_input_to_device(
+    input: ModelInput,
+    device: str | torch.device
+) -> ModelInput:
+    fields: list = []
+    for val in input:
+        fields.append(val.to(device))
+    return ModelInput(*fields)
+
+
 def main() -> None:
     args = parse_args()
     print(args)
@@ -829,30 +860,6 @@ def main() -> None:
         if hasattr(model.config.text_config, "use_cache"):
             model.config.text_config.use_cache = False
 
-    if args.eval_tasks is not None:
-        if "vqa" in args.eval_tasks:
-            original_results = evaluate_model(
-                model,
-                processor,
-                args.eval_tasks,
-                args.device,
-                args.nsamples_for_evaluation,
-                max_seq_len=args.max_seq_len,
-            )
-            print_eval_results("Evaluating original model", original_results)
-
-        if "coco" in args.eval_tasks:
-            print("\n=== COCO Evaluation (Original Model) ===")
-            results = evaluate_model_coco(
-                model=model,
-                processor=processor,
-                device=args.device,
-                nsamples=args.nsamples_for_evaluation,
-                max_seq_len=args.max_seq_len,
-            )
-            for metric, value in results.items():
-                print(f"{metric:<10} {value:.3f}")
-
     # MMLU evaluation on original model
     if args.mmlu_subjects is not None:
         print("\n=== MMLU Evaluation (Original Model) ===")
@@ -882,21 +889,6 @@ def main() -> None:
             verbose=args.verbose,
         )
         print_mmmu_results(original_mmmu_results)
-
-    # PPL evaluation on original model
-    if args.ppl_dataset:
-        print("\n=== PPL Evaluation (Original Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
-        original_ppl = evaluate_ppl(
-            model=model,
-            tokenizer=processor.tokenizer,
-            ds=ds_ppl,
-            device=args.device,
-            stride=args.ppl_stride,
-            max_seq_len=args.max_seq_len,
-            show_progress=not args.hide_progress,
-        )
-        print(f"Original PPL: {original_ppl:.2f}")
 
     calib_inputs = get_calib_inputs(
         "vqav2",
@@ -1066,7 +1058,6 @@ def main() -> None:
                 max_seq_len=args.max_seq_len,
             )
             print_eval_results("Evaluating quantized model", quantized_results)
-            print_markdown_comparison(original_results, quantized_results)
 
         if "coco" in args.eval_tasks:
             print("\n=== COCO Evaluation (Quantized Model) ===")
@@ -1125,6 +1116,25 @@ def main() -> None:
         )
         print(f"Quantized PPL: {quantized_ppl:.2f}")
 
+    # Convert to Circle format
+    #example_input: ModelInput = dict_to_model_input(move_batch_to_device(calib_inputs[0], args.device))
+    example_input: ModelInput = create_visual_input(
+        seq_len=1000,
+        thw=grid_thw,
+        spatial_merge_size=model.config.vision_config.spatial_merge_size,
+        temporal_patch_size=model.config.vision_config.temporal_patch_size,
+        spatial_patch_size=model.config.vision_config.patch_size,
+        vocab_size=model.config.text_config.vocab_size,
+        image_token_id=model.config.image_token_id,
+    )
+    example_input = move_model_input_to_device(example_input, args.device)
+    q_m.wrapped.config.return_dict = False
+    circle_model = tico.convert(q_m.eval(), example_input)
+
+    # Save the Circle model
+    filename = "qwen3vl.q.circle"
+    circle_model.save(filename)
+    print(f"Circle model saved as '{filename}'")
 
 if __name__ == "__main__":
     main()

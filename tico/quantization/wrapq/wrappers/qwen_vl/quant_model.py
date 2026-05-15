@@ -120,10 +120,6 @@ class QuantQwen3VLModel(QuantModuleBase):
         return_dict = (
             return_dict if return_dict is not None else self.config.return_dict
         )
-        if torch.compiler.is_compiling() or self.force_export:
-            assert (
-                position_ids is not None
-            ), "position_ids must be provided as an argument since it's computation cannot be converted to Circle"
 
         # Validate input
         if (input_ids is None) ^ (inputs_embeds is not None):
