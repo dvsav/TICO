@@ -744,6 +744,8 @@ class StaticGemma4Runtime:
             dtype=hidden_states.dtype,
         )
 
+        valid_positions = (attention_masks["full_attention"] == 0.0).sum().item()
+
         # Compute PLE for the single decode token if enabled
         per_layer_inputs = None
         if self.text_model.hidden_size_per_layer_input:
