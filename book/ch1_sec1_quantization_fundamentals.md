@@ -21,14 +21,17 @@ At its core, **quantization** is a function that maps a continuous (or high-prec
 Given a floating-point value `x ∈ ℝ`, the quantization operation produces an integer `x_q ∈ ℤ`:
 
 ```
-x_q = clip(round(x / s), q_min, q_max)
+x_q = clip(round(x / s + z), q_min, q_max)
 ```
 
 Where:
 - `s` is the **scale** (a positive floating-point number)
+- `z` is the **zero-point** (an integer that maps to floating-point value 0)
 - `round(·)` rounds to the nearest integer
 - `clip(v, q_min, q_max)` constrains values to `[q_min, q_max]`
 - `q_min` and `q_max` are determined by the bit width
+
+**Note:** For symmetric quantization, `z = 0`, simplifying the formula to `x_q = clip(round(x / s), q_min, q_max)`. The zero-point becomes essential for asymmetric quantization, where the range is not centered around zero.
 
 ### The Dequantization Formula
 
@@ -74,10 +77,12 @@ s ≈ 0.533
 
 **Step 3: Quantize a sample value**
 
+This example uses **symmetric quantization** (zero-point z = 0).
+
 Let's quantize `x = 2.5`:
 
 ```
-x_q = round(2.5 / 0.533)
+x_q = round(2.5 / 0.533 + 0)  # z = 0 for symmetric
 x_q = round(4.69)
 x_q = clip(5, -8, 7)
 x_q = 5
@@ -86,11 +91,13 @@ x_q = 5
 **Step 4: Dequantize to verify**
 
 ```
-x̂ = 5 × 0.533
+x̂ = (5 - 0) × 0.533  # z = 0
 x̂ ≈ 2.67
 ```
 
 **Quantization error:** `|2.5 - 2.67| = 0.17`
+
+**Note:** This example demonstrates symmetric quantization where the zero-point is 0. For asymmetric quantization (covered in Section 3), the zero-point would be non-zero to account for the asymmetric range.
 
 ---
 
@@ -182,38 +189,46 @@ import torch
 
 def quantize_tensor(x, bits=8, symmetric=True):
     """
-    Simple symmetric quantization demo.
+    Quantization demo with proper zero-point handling.
     """
     # Determine quantization range
     if symmetric:
         q_max = 2 ** (bits - 1) - 1
         q_min = -q_max - 1
+        zero_point = 0
     else:
         q_max = 2 ** bits - 1
         q_min = 0
+        # Compute zero-point for asymmetric quantization
+        scale = (x.max() - x.min()) / (q_max - q_min)
+        zero_point = torch.round(-x.min() / scale).to(torch.int32)
     
-    # Compute scale (symmetric: uses max absolute value)
+    # Compute scale
     if symmetric:
         scale = x.abs().max() / q_max
     else:
         scale = (x.max() - x.min()) / (q_max - q_min)
     
-    # Quantize
-    x_q = torch.round(x / scale).clamp(q_min, q_max)
+    # Quantize: x_q = round(x / s + z)
+    x_q = torch.round(x / scale + zero_point).clamp(q_min, q_max)
     
-    # Dequantize
-    x_deq = x_q * scale
+    # Dequantize: x̂ = (x_q - z) × s
+    x_deq = (x_q - zero_point) * scale
     
     # Compute error
     error = (x - x_deq).abs().mean().item()
     
-    return x_deq, scale, error
+    return x_deq, scale, zero_point
 
-# Test with random tensor
+# Test with random tensor (symmetric quantization, z=0)
 x = torch.randn(1000)
-x_deq, scale, error = quantize_tensor(x, bits=8)
+x_deq, scale, zero_point = quantize_tensor(x, bits=8)
+
+# Compute error separately
+error = (x - x_deq).abs().mean().item()
 
 print(f"Scale: {scale:.6f}")
+print(f"Zero-point: {zero_point}")
 print(f"Mean absolute error: {error:.6f}")
 print(f"Max absolute error: {(x - x_deq).abs().max().item():.6f}")
 ```
@@ -221,6 +236,7 @@ print(f"Max absolute error: {(x - x_deq).abs().max().item():.6f}")
 **Expected output:**
 ```
 Scale: ~0.15 (depends on random seed)
+Zero-point: 0  (symmetric quantization)
 Mean absolute error: ~0.04
 Max absolute error: ~0.08 (clipping may increase this)
 ```

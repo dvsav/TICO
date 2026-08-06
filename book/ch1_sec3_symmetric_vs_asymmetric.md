@@ -66,9 +66,18 @@ Dequantize: x̂ = x_q × s
 
 ### Disadvantages of Symmetric Quantization
 
-1. **Wasted range for asymmetric data:** If data is heavily skewed (e.g., ReLU outputs in `[0, 10]`), symmetric quantization wastes half the levels on negative values that never occur.
+1. **Wasted range for asymmetric data:** If data is heavily skewed (e.g., ReLU outputs in `[0, 10]`), symmetric quantization wastes half the levels on negative values that never occur. This directly leads to a larger scale:
 
-2. **Potentially larger scale:** For the same data, symmetric quantization may have a larger scale than asymmetric, leading to higher quantization error.
+   ```
+   Example: ReLU output in [0, 10], 8-bit quantization
+   
+   Symmetric:  Range = [-10, 10], scale = 20/255 ≈ 0.078
+   Asymmetric: Range = [0, 10],   scale = 10/255 ≈ 0.039
+   
+   Symmetric scale is 2× larger → 2× higher quantization error!
+   ```
+
+   The larger scale is not a separate issue—it's the direct consequence of wasting quantization levels on unused portions of the range.
 
 ---
 
@@ -89,13 +98,21 @@ Quantize:   x_q = clip(round(x / s + z), q_min, q_max)
 Dequantize: x̂ = (x_q - z) × s
 ```
 
-### Integer Range for Unsigned Asymmetric Quantization
+### Integer Type for Asymmetric Quantization
 
-| Bit Width | q_min | q_max | Total Levels |
-|-----------|-------|-------|--------------|
-| UINT8 | 0 | 255 | 256 |
-| UINT4 | 0 | 15 | 16 |
-| UINT2 | 0 | 3 | 4 |
+**Important:** Asymmetric quantization is defined by having a **non-zero zero-point**, not by using unsigned integers. You can use either signed or unsigned integer types:
+
+| Bit Width | Signed (INT) | Unsigned (UINT) |
+|-----------|--------------|-----------------|
+| 8-bit | INT8: [-128, 127] | UINT8: [0, 255] |
+| 4-bit | INT4: [-8, 7] | UINT4: [0, 15] |
+| 2-bit | INT2: [-2, 1] | UINT2: [0, 3] |
+
+**Choice depends on the data:**
+- **Unsigned** is natural for non-negative data (ReLU outputs, probabilities)
+- **Signed** may be preferred for hardware that only supports signed integer arithmetic
+
+The key difference from symmetric quantization is that asymmetric uses a **non-zero zero-point** to match the actual data range, regardless of the integer type chosen.
 
 ### Advantages of Asymmetric Quantization
 
@@ -109,9 +126,14 @@ Dequantize: x̂ = (x_q - z) × s
 
 1. **Zero-point overhead:** Requires storing and applying zero-point during computation.
 
-2. **Complex integer arithmetic:** Matrix multiplication requires handling zero-point offsets.
+2. **Complex integer arithmetic:** Matrix multiplication requires handling zero-point offsets:
+   ```
+   With zero-point: C_q = (A_q - z_A) × (B_q - z_B) × s_A × s_B
+                    = A_q × B_q - A_q × z_B - z_A × B_q + z_A × z_B
+   ```
+   This requires 3 additional subtractions and 2 additional multiplications per element compared to symmetric quantization.
 
-3. **Zero may not be exact:** If zero-point calculation has rounding error, zero might not be exactly representable.
+3. **Zero-point rounding:** The zero-point is computed as `z = round(-x_min / s)`, which introduces a small rounding error. However, in practice, the zero-point is stored as an integer of the same type as the quantized values (e.g., INT8), so floating-point zero is **always exactly represented** by one quantization level. The rounding error affects which integer represents zero, not whether zero is representable.
 
 ---
 

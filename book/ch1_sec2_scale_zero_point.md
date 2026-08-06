@@ -183,11 +183,7 @@ z = 58
 **Step 3: Verify zero-point maps correctly**
 
 ```
-x = 0 → x_q = round(0 / 0.0396) - 58 = -58  (clipped to 0)
-
-Wait—this is wrong! Let me recalculate:
-
-Correct formula: x_q = round(x / s + z)
+x = 0 → x_q = round(x / s + z)
 x = 0 → x_q = round(0 / 0.0396 + 58) = round(58) = 58
 x̂ = (58 - 58) × 0.0396 = 0  ✓
 ```
