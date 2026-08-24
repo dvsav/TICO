@@ -26,5 +26,6 @@ out/
 # Dump files
 .tico_tmp/
 
-# Claude Code local settings
-.claude/
+CODE/
+.vscode/
+.workspace_rag/
