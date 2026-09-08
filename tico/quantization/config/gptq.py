@@ -89,3 +89,63 @@ class GPTQConfig(BaseConfig):
             raise ValueError(f"groupsize must be -1 or positive. got {self.groupsize}")
         if not (0.0 < self.percdamp <= 1.0):
             raise ValueError(f"percdamp must be in (0, 1]. got {self.percdamp}")
+
+
+@dataclass
+class UniversalGPTQConfig(GPTQConfig):
+    """
+    Configuration for universal GPTQ quantizer.
+
+    This config class is identical to GPTQConfig but maps to the universal
+    GPTQ quantizer implementation, which works with any PyTorch model without
+    requiring model-specific wrapper classes.
+
+    Inherits all GPTQConfig options:
+        - weight_bits, weight_bits_overrides
+        - perchannel, symmetric, mse
+        - percdamp, groupsize, actorder, static_groups
+        - verbose, show_progress
+
+    Additional options:
+        free_children_cache: If True, releases cached outputs of nested submodules
+            when their parent block finishes caching. Reduces memory usage from
+            O(all layers) to O(one block depth) at any time. Default: True.
+
+    Usage example:
+        from tico.quantization.config.gptq import UniversalGPTQConfig
+        from tico.quantization import prepare, convert
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            free_children_cache=True,
+        )
+        model = prepare(model, config)
+        # ... calibrate ...
+        model = convert(model)
+    """
+
+    # Universal-specific options
+    free_children_cache: bool = True
+
+    @property
+    def name(self) -> str:
+        return "universal_gptq"
+
+    def validate(self) -> None:
+        # First validate parent class
+        super().validate()
+        # Then validate universal-specific options
+        if not isinstance(self.free_children_cache, bool):
+            raise TypeError(
+                f"free_children_cache must be bool. got {type(self.free_children_cache)}"
+            )
+
+        # use_orig_model_inference is incompatible with frontier-based execution
+        if self.use_orig_model_inference:
+            raise ValueError(
+                "use_orig_model_inference=True is incompatible with UniversalGPTQConfig. "
+                "The universal quantizer uses a frontier-based execution strategy where "
+                "downstream modules necessarily receive quantized outputs from upstream "
+                "modules during replay. If you need this feature, use GPTQConfig with "
+                "the layer-by-layer quantizer instead."
+            )
