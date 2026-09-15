@@ -1,3 +1,36 @@
+"""
+Universal GPTQ Quantizer for PyTorch Models.
+
+This module implements a model-agnostic GPTQ (Gradient-based Post-Training Quantization)
+algorithm that works with any PyTorch model composed of standard layers (Linear, Conv1d,
+Conv2d, Conv3d, ConvTranspose2d) without requiring model-specific wrapper classes.
+
+The quantizer uses a frontier-based execution strategy with a state machine approach:
+1. COLLECT: Accumulate Hessian information from calibration inputs
+2. CACHE: Cache module outputs for downstream replay
+3. RETURN_CACHED: Return cached outputs without computation
+4. COMPUTE: Normal forward pass after quantization
+
+Key Features:
+- Model-agnostic: Works with any PyTorch architecture
+- Layer-by-layer quantization with Hessian-based error minimization
+- Memory-efficient caching on CPU to save GPU memory
+- Support for per-channel and per-tensor quantization
+- Configurable bit-width with module-level overrides
+- Sensitivity-aware MSE optimization (optional)
+
+Example:
+    from tico.quantization.config.gptq import UniversalGPTQConfig
+    from tico.quantization.algorithm.universal_gptq.quantizer import UniversalGPTQQuantizer
+
+    config = UniversalGPTQConfig(weight_bits=8, percdamp=0.01)
+    quantizer = UniversalGPTQQuantizer(config)
+
+    model = quantizer.prepare(model)
+    # Run calibration data through model
+    model = quantizer.convert(model)
+"""
+
 import types
 from dataclasses import dataclass
 from enum import Enum
@@ -5,7 +38,6 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
-from tqdm.auto import tqdm
 
 from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.gptq.quant import Quantizer
@@ -13,6 +45,7 @@ from tico.quantization.config.gptq import UniversalGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
 from tico.utils.utils import move_to_device
+from tqdm.auto import tqdm
 
 
 __all__ = [
@@ -46,7 +79,7 @@ def move_to_cpu(obj) -> Any:
     return move_to_device(obj, "cpu")
 
 
-def infer_device(model: nn.Module) -> torch.device:
+def infer_module_device(model: nn.Module) -> torch.device | None:
     """
     Return the device of the first parameter in the model.
 
@@ -59,7 +92,65 @@ def infer_device(model: nn.Module) -> torch.device:
     try:
         return next(model.parameters()).device
     except StopIteration:
-        return torch.device("cpu")
+        return None
+
+
+def infer_object_device(obj: Any) -> torch.device | None:
+    """
+    Infer the device of a tensor or nested structure of tensors.
+
+    This function recursively traverses tuples, lists, dicts, and objects
+    with __dict__ attributes to determine the device where the tensors reside.
+    All tensors in the structure must be on the same device.
+
+    Parameters:
+        obj: A tensor or nested structure (tuple, list, dict, or object)
+             containing tensors.
+
+    Returns:
+        The device where the tensors reside, or None if obj is None or
+        contains no tensors.
+
+    Raises:
+        AssertionError: If tensors within the same structure are on different devices.
+    """
+    if obj is None:
+        return None
+
+    if isinstance(obj, torch.Tensor):
+        return obj.device
+
+    def equal_or_none(a, b) -> bool:
+        return a == b or a is None
+
+    if isinstance(obj, tuple):
+        assert len(obj) > 0
+        device = infer_object_device(obj[0])
+        assert all(
+            equal_or_none(infer_object_device(x), device) for x in obj
+        ), "Different devices across tuple"
+        return device
+
+    if isinstance(obj, list):
+        assert len(obj) > 0
+        device = infer_object_device(obj[0])
+        assert all(
+            equal_or_none(infer_object_device(x), device) for x in obj
+        ), "Different devices across list"
+        return device
+
+    if isinstance(obj, dict):
+        assert len(obj) > 0
+        device = infer_object_device(next(iter(obj.items()))[1])
+        assert all(
+            equal_or_none(infer_object_device(v), device) for k, v in obj.items()
+        ), "Different devices across dict"
+        return device
+
+    if hasattr(obj, "__dict__"):
+        return infer_object_device(obj.__dict__)
+
+    return None
 
 
 @register_quantizer(UniversalGPTQConfig)
@@ -222,7 +313,8 @@ class GPTQ_Data:
         state: Current state in the quantization lifecycle.
         invocation_idx: Current invocation index during replay.
         num_invocations: Total number of invocations (set after caching phase).
-        device: Device where the module's parameters reside.
+        weight_device: Device where the module's parameters reside.
+        out_device: Device where module output should reside.
     """
 
     full_module_name: str
@@ -233,7 +325,8 @@ class GPTQ_Data:
     state: GPTQ_STATE
     invocation_idx: int
     num_invocations: int
-    device: torch.device
+    weight_device: torch.device | None
+    out_device: torch.device | None
 
 
 class StopForward(Exception):
@@ -329,14 +422,19 @@ def wrap_model(
                 if gptq_data.gptq is None:
                     gptq_data.gptq = GPTQ(module)
                 gptq_data.gptq.add_batch(
-                    # Move input to model's device for Hessian accumulation
-                    inp=args[0].data.to(gptq_data.device),
+                    # Move input to model's weight device for Hessian accumulation
+                    inp=args[0].data.to(gptq_data.weight_device),
                     out=None,  # out is ignored in GPTQ.add_batch
                 )
                 raise StopForward(module)
 
             case GPTQ_STATE.CACHE:
+                args = move_to_device(args, gptq_data.weight_device)
+                kwargs = move_to_device(kwargs, gptq_data.weight_device)
+                assert type(kwargs) is dict
                 out: Any = gptq_data.old_forward(*args, **kwargs)
+                if gptq_data.out_device is None:
+                    gptq_data.out_device = infer_object_device(out)
                 # Cache on CPU to save GPU memory
                 gptq_data.cached_output.append(move_to_cpu(out))
                 gptq_data.invocation_idx += 1
@@ -348,9 +446,14 @@ def wrap_model(
                     gptq_data.invocation_idx + 1
                 ) % gptq_data.num_invocations
                 # Move cached output back to model's device
-                return move_to_device(result, gptq_data.device)
+                if gptq_data.out_device:
+                    result = move_to_device(result, gptq_data.out_device)
+                return result
 
             case GPTQ_STATE.COMPUTE:
+                args = move_to_device(args, gptq_data.weight_device)
+                kwargs = move_to_device(kwargs, gptq_data.weight_device)
+                assert type(kwargs) is dict
                 return gptq_data.old_forward(*args, **kwargs)
 
             case _:
@@ -370,7 +473,8 @@ def wrap_model(
             else GPTQ_STATE.CACHE,
             invocation_idx=0,
             num_invocations=0,
-            device=infer_device(model),
+            weight_device=infer_module_device(model),
+            out_device=None,
         ),
     )
 
@@ -389,7 +493,16 @@ def wrap_model(
 
 
 def unwrap_model(model: nn.Module) -> None:
-    """Restore original module structure with quantized weights."""
+    """
+    Restore original module structure after GPTQ quantization.
+
+    This function reverses the wrapping applied by `wrap_model`, restoring
+    the original forward methods and removing the `gptq_data` attribute.
+    It also clears cached outputs to free memory.
+
+    Parameters:
+        model: The wrapped model to unwrap (modified in-place).
+    """
     gptq_data: GPTQ_Data = get_gptq_data(model)
 
     model.forward = gptq_data.old_forward
@@ -460,7 +573,7 @@ def run_model(
     Returns:
         Set of frontier modules that raised StopForward during execution.
     """
-    assert has_gptq_data(model)
+    gptq_data: GPTQ_Data = get_gptq_data(model)
     frontier_submodules: set[nn.Module] = set()
     for args, kwargs in tqdm(
         zip(args_dataset, kwargs_dataset),
@@ -469,6 +582,9 @@ def run_model(
         unit="batch",
         disable=not show_progress,
     ):
+        args = move_to_device(args, gptq_data.weight_device)
+        kwargs = move_to_device(kwargs, gptq_data.weight_device)
+        assert type(kwargs) is dict
         try:
             model(*args, **kwargs)
         except StopForward as stop_fwd:
@@ -481,7 +597,21 @@ def resolve_weight_bits(
     gptq_config: UniversalGPTQConfig,
     full_module_name: str,
 ) -> int:
-    """Resolve the effective bit-width for a quantized submodule."""
+    """
+    Resolve the effective bit-width for a quantized submodule.
+
+    This function checks for bit-width overrides in the following order:
+    1. Full module name match (e.g., "model.layers.0.self_attn.o_proj")
+    2. Local module name match (e.g., "self_attn.o_proj")
+    3. Suffix match (e.g., "o_proj" or "down_proj")
+
+    Parameters:
+        gptq_config: GPTQ configuration containing weight_bits and overrides.
+        full_module_name: Hierarchical module path (e.g., "model.layers.0.mlp.down_proj").
+
+    Returns:
+        The effective bit-width for this module.
+    """
     if full_module_name in gptq_config.weight_bits_overrides:
         return gptq_config.weight_bits_overrides[full_module_name]
 
@@ -505,14 +635,20 @@ def get_sensitivity(
     sensitivity: dict[str, torch.Tensor] | None,
     full_module_name: str,
 ) -> torch.Tensor | None:
-    if (
-        sensitivity is not None
-        and isinstance(sensitivity, dict)
-        and full_module_name in sensitivity
-    ):
-        return sensitivity[full_module_name]
-    else:
-        return None
+    """
+    Retrieve sensitivity tensor for a specific module.
+
+    Sensitivity tensors contain second-order derivative information used for
+    sensitivity-aware MSE optimization during GPTQ quantization.
+
+    Parameters:
+        sensitivity: Dictionary mapping module names to sensitivity tensors,
+                     or None if sensitivity is not being used.
+        full_module_name: Hierarchical module path to look up.
+
+    Returns:
+        The sensitivity tensor for this module, or None if not available.
+    """
 
 
 def finish_collection(

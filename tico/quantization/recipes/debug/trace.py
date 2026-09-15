@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 import torch
 
 from tico.quantization import convert, prepare
+from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.recipes.context import RecipeContext
 
 
@@ -61,6 +62,7 @@ def collect_forward_outputs(
 
     hooks = []
     for name, module in model.named_modules():
+        name = name.replace(".wrapped", "").replace("wrapped.", "")
         if skip_wrappers and module.__class__.__name__.startswith("Quant"):
             continue
         if (
@@ -106,7 +108,7 @@ def compare_outputs(left: Mapping[str, Any], right: Mapping[str, Any]) -> None:
         ):
             diff = (lval.detach().float() - rval.detach().float()).abs()
             print(
-                f"{name}: mean|diff|={diff.mean().item():.8f}, max|diff|={diff.max().item():.8f}"
+                f"{name}: mean|diff|={diff.mean().item():.8f}, max|diff|={diff.max().item():.8f}, peir={compute_peir(lval, rval) * 100:.6f}%"
             )
         else:
             print(f"{name}: non-tensor or shape-mismatched output")

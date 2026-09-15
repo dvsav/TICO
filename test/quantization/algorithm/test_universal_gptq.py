@@ -24,9 +24,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from tico.quantization.algorithm.gptq.universal_gptq_quantizer import (
-    UniversalGPTQQuantizer,
-)
+from tico.quantization.algorithm.universal_gptq.quantizer import UniversalGPTQQuantizer
 from tico.quantization.config.gptq import UniversalGPTQConfig
 
 

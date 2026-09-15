@@ -23,16 +23,6 @@ calibration:
   decode_steps: 8
 
 pipeline:
-  - name: spinquant
-    enabled: false
-
-  - name: cle
-    enabled: false
-    pairs:
-      - model.layers.*.mlp.up_proj:model.layers.*.mlp.down_proj
-    method: absmax
-    max_iter: 1
-
   - name: gptq
     enabled: true
     variant: universal
@@ -48,9 +38,8 @@ pipeline:
     groupsize: -1
     actorder: true
     static_groups: false
-    quantize_lm_head: false
     use_orig_model_inference: false
-    verbose: false
+    verbose: true
     show_progress: true
 
   - name: ptq
@@ -65,16 +54,3 @@ pipeline:
     strict_wrap: true
     decode_calibration_steps: 8
 
-evaluation:
-  enabled: false
-  perplexity: null
-  lm_eval_tasks: null
-  max_seq_len: 2048
-
-export:
-  enabled: true
-  output_dir: ./out/llama_universal_gptq_quantized
-  max_seq_len: 2048
-  prefill_decode: true
-  artifacts:
-    - ptq_checkpoint
